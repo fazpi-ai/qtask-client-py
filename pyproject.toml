@@ -1,7 +1,10 @@
 [project]
 name = "qtask-client-py"
 version = "0.1.0"
-dependencies = []
+dependencies = [
+    "requests",
+    "redis"
+]
 
 [build-system]
 requires = ["setuptools"]
