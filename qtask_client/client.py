@@ -1,8 +1,10 @@
 import logging
 import random
 import string
-import time  # Added for example usage sleep
+import time
+import os # Import os module to read environment variables
 from typing import Dict, Callable, Optional, List, Any, Tuple
+from urllib.parse import urlunparse # To build Redis URL
 
 # Import other library components
 from .api_client import (
@@ -21,32 +23,103 @@ class QTaskClient:
     Main client and facade for interacting with the QTask Broker system.
 
     Provides simplified methods for publishing messages and creating/managing
-    consumers based on registered handlers.
+    consumers based on registered handlers. Configuration can be provided
+    via constructor arguments or environment variables.
     """
 
-    def __init__(self, broker_api_url: str, redis_url: str):
+    # --- Default Configuration Values ---
+    DEFAULT_BROKER_URL = "http://localhost:3000"
+    DEFAULT_REDIS_HOST = "localhost"
+    DEFAULT_REDIS_PORT = 6379
+    DEFAULT_REDIS_USERNAME = None # Or 'default' if that's standard for your Redis setup
+    DEFAULT_REDIS_PASSWORD = None
+
+    def __init__(
+        self,
+        broker_api_url: Optional[str] = None,
+        redis_url: Optional[str] = None,
+        # --- OR provide individual Redis components ---
+        redis_host: Optional[str] = None,
+        redis_port: Optional[int] = None,
+        redis_username: Optional[str] = None,
+        redis_password: Optional[str] = None,
+    ):
         """
         Initializes the QTask client.
 
+        Configuration priority:
+        1. Explicit constructor arguments (broker_api_url, redis_url).
+        2. Individual Redis components if redis_url is not given (redis_host, etc.).
+        3. Environment variables (QTASK_BROKER_URL, REDIS_HOST, REDIS_PORT, etc.).
+        4. Default values.
+
         Args:
-            broker_api_url (str): The base URL of the QTask Broker API.
-            redis_url (str): The Redis connection URL for the Consumer Workers.
-                             (e.g., "redis://user:pass@host:port")
+            broker_api_url (Optional[str]): Base URL of the QTask Broker API.
+                                            Defaults to env QTASK_BROKER_URL or DEFAULT_BROKER_URL.
+            redis_url (Optional[str]): Full Redis connection URL (e.g., "redis://user:pass@host:port").
+                                       Takes precedence over individual components if provided.
+                                       Defaults to constructing from other args/env/defaults.
+            redis_host (Optional[str]): Redis host. Defaults to env REDIS_HOST or DEFAULT_REDIS_HOST.
+            redis_port (Optional[int]): Redis port. Defaults to env REDIS_PORT or DEFAULT_REDIS_PORT.
+            redis_username (Optional[str]): Redis username. Defaults to env REDIS_USERNAME or DEFAULT_REDIS_USERNAME.
+            redis_password (Optional[str]): Redis password. Defaults to env REDIS_PASSWORD or DEFAULT_REDIS_PASSWORD.
         """
-        if not broker_api_url:
-            raise ValueError("broker_api_url cannot be empty.")
-        if not redis_url:
-            raise ValueError("redis_url cannot be empty.")
 
-        self.broker_api_url = broker_api_url
-        self.redis_url = redis_url
+        # --- Determine Broker API URL ---
+        if broker_api_url:
+            self.broker_api_url = broker_api_url
+            logger.info(f"Using provided Broker API URL: {self.broker_api_url}")
+        else:
+            self.broker_api_url = os.environ.get("QTASK_BROKER_URL", self.DEFAULT_BROKER_URL)
+            logger.info(f"Using Broker API URL from env/default: {self.broker_api_url}")
+
+        if not self.broker_api_url: # Should not happen with default, but check anyway
+            raise ValueError("Could not determine Broker API URL.")
+
+        # --- Determine Redis URL ---
+        if redis_url:
+            self.redis_url = redis_url
+            logger.info(f"Using provided Redis URL: {self.redis_url}")
+        else:
+            # Construct from components (args -> env -> defaults)
+            _host = redis_host or os.environ.get("REDIS_HOST", self.DEFAULT_REDIS_HOST)
+            _port_str = os.environ.get("REDIS_PORT", str(self.DEFAULT_REDIS_PORT))
+            try:
+                 _port = redis_port or int(_port_str)
+            except (ValueError, TypeError):
+                 logger.warning(f"Invalid REDIS_PORT environment variable '{_port_str}'. Using default {self.DEFAULT_REDIS_PORT}.")
+                 _port = self.DEFAULT_REDIS_PORT
+
+            # Handle optional username/password, allowing empty strings from env
+            _user_env = os.environ.get("REDIS_USERNAME")
+            _pass_env = os.environ.get("REDIS_PASSWORD")
+
+            _user = redis_username if redis_username is not None else _user_env
+            _pass = redis_password if redis_password is not None else _pass_env
+
+            # Construct the URL: redis://[user:pass@]host:port
+            netloc = ""
+            if _user and _pass:
+                netloc = f"{_user}:{_pass}@{_host}:{_port}"
+            elif _user: # Username only (less common for Redis standard auth)
+                 netloc = f"{_user}@{_host}:{_port}"
+            else: # No auth or password only (ACL might use password without user)
+                 if _pass:
+                      netloc = f":{_pass}@{_host}:{_port}" # Format for password only
+                 else:
+                      netloc = f"{_host}:{_port}"
+
+            self.redis_url = urlunparse(("redis", netloc, "", "", "", ""))
+            logger.info(f"Constructed Redis URL from components/env/defaults: {self.redis_url}")
+
+        if not self.redis_url: # Should not happen, but check
+            raise ValueError("Could not determine Redis URL.")
+
+        # --- Initialize API Client and Worker Management ---
         self.api_client = QTaskBrokerApiClient(base_url=self.broker_api_url)
-
-        # Registry for handlers: {(topic, group): handler_function}
         self._handler_registry: Dict[Tuple[str, str], MessageHandler] = {}
-        # --- NEW: Internal list to manage active workers ---
         self._active_workers: List[QTaskConsumerWorker] = []
-        self._consumers_started = False  # Flag to track if consumers were started
+        self._consumers_started = False
 
         logger.info(
             f"QTaskClient initialized. Broker API: {self.broker_api_url}, Redis URL: {self.redis_url}"
@@ -59,30 +132,14 @@ class QTaskClient:
         )
         return f"consumer-{topic}-{group}-{random_suffix}"
 
-    # --- Decorator for registering Handlers ---
     def handler(
         self, topic: str, group: str
     ) -> Callable[[MessageHandler], MessageHandler]:
-        """
-        Decorator to register a function as a handler for a specific topic and group.
-
-        Usage:
-            @qtask_client.handler(topic="MY_TOPIC", group="MY_GROUP")
-            def my_handler_function(data, message_id, partition_index):
-                # ... process message ...
-
-        Args:
-            topic (str): The base topic name.
-            group (str): The consumer group name.
-
-        Returns:
-            The actual decorator.
-        """
+        """Decorator to register a message handler."""
         if not topic or not group:
             raise ValueError(
                 "Topic and group cannot be empty in the handler decorator."
             )
-
         def decorator(func: MessageHandler) -> MessageHandler:
             key = (topic, group)
             if key in self._handler_registry:
@@ -94,29 +151,12 @@ class QTaskClient:
             )
             self._handler_registry[key] = func
             return func
-
         return decorator
-
-    # --- Public Facade Methods ---
 
     def publish(
         self, topic: str, partition_key: str, data: Dict[str, Any]
     ) -> Tuple[int, str]:
-        """
-        Publishes a message to the specified topic.
-
-        Args:
-            topic: Base topic name.
-            partition_key: Key used to determine the partition.
-            data: Dictionary containing the message data.
-
-        Returns:
-            A tuple (partition_index: int, message_id: str) on success.
-
-        Raises:
-            BrokerApiException: If the Broker API returns an error or connection issues occur.
-            ValueError: If the API response is invalid.
-        """
+        """Publishes a message."""
         logger.debug(f"Publish request: Topic={topic}, PartitionKey={partition_key}")
         try:
             partition_index, message_id = self.api_client.push(
@@ -127,84 +167,42 @@ class QTaskClient:
             logger.error(f"Failed to publish to topic '{topic}': {e}", exc_info=True)
             raise
 
-    # Method remains largely the same but is now primarily for internal use by start_all_consumers
-    # Could be made private (`_create_consumer`) if desired.
     def create_consumer(self, topic: str, group: str) -> Optional[QTaskConsumerWorker]:
-        """
-        Creates and configures a QTaskConsumerWorker for a specific topic/group.
-        This is primarily used internally by start_all_consumers.
-
-        Args:
-            topic: Base topic name.
-            group: Consumer group name.
-
-        Returns:
-            A QTaskConsumerWorker instance ready to be started, or None if assignment fails recoverably.
-
-        Raises:
-            ValueError: If no handler was found registered for the topic/group.
-            BrokerApiException: If unrecoverable errors occur contacting the Broker API.
-            RuntimeError: If a partition could not be assigned after max retries.
-        """
+        """Creates a consumer worker instance (used internally)."""
         logger.debug(
             f"Attempting to create consumer for topic '{topic}', group '{group}'."
         )
-
         handler_key = (topic, group)
         registered_handler = self._handler_registry.get(handler_key)
         if registered_handler is None:
             msg = f"No handler registered for topic '{topic}', group '{group}'. Cannot create consumer."
             logger.error(msg)
             raise ValueError(msg)
-        logger.debug(
-            f"Handler '{registered_handler.__name__}' found for {handler_key}."
-        )
 
         consumer_id = self._generate_consumer_id(topic, group)
         logger.debug(f"Generated consumer ID: {consumer_id}")
 
         try:
-            logger.info(
-                f"Requesting partition assignment from API for {consumer_id}..."
-            )
-            partition_index = self.api_client.assign_partition(
-                topic, group, consumer_id
-            )
+            logger.info(f"Requesting partition assignment from API for {consumer_id}...")
+            partition_index = self.api_client.assign_partition(topic, group, consumer_id)
             logger.info(f"Partition {partition_index} assigned to {consumer_id}.")
         except NoPartitionsAvailableError:
-            # This is a potentially temporary state, log and return None
-            logger.warning(
-                f"No partitions currently available for topic '{topic}', group '{group}'. Consumer not created."
-            )
+            logger.warning(f"No partitions currently available for topic '{topic}', group '{group}'. Consumer not created.")
             return None
         except (BrokerApiException, RuntimeError) as e:
-            # These are more serious errors (connection, max retries exceeded)
-            logger.error(
-                f"Could not get partition assignment for {consumer_id}: {e}",
-                exc_info=True,
-            )
-            raise  # Re-raise critical errors
+            logger.error(f"Could not get partition assignment for {consumer_id}: {e}", exc_info=True)
+            raise
 
         try:
-            logger.info(
-                f"Ensuring subscription via API for partition {partition_index}..."
-            )
+            logger.info(f"Ensuring subscription via API for partition {partition_index}...")
             subscribed = self.api_client.subscribe(topic, group, partition_index)
-            if not subscribed:
-                logger.warning(
-                    f"API indicated failure ensuring subscription for partition {partition_index}, continuing anyway..."
-                )
+            if not subscribed: logger.warning(f"API indicated failure ensuring subscription for partition {partition_index}, continuing anyway...")
         except Exception as e:
-            logger.warning(
-                f"Error calling /subscribe for partition {partition_index} (continuing): {e}",
-                exc_info=False,
-            )
+            logger.warning(f"Error calling /subscribe for partition {partition_index} (continuing): {e}", exc_info=False)
 
-        logger.info(
-            f"Creating QTaskConsumerWorker instance for partition {partition_index}..."
-        )
+        logger.info(f"Creating QTaskConsumerWorker instance for partition {partition_index}...")
         worker = QTaskConsumerWorker(
-            redis_url=self.redis_url,
+            redis_url=self.redis_url, # Worker still uses the final URL
             topic=topic,
             group=group,
             partition_index=partition_index,
@@ -214,70 +212,37 @@ class QTaskClient:
         logger.info(f"QTaskConsumerWorker created for {consumer_id}.")
         return worker
 
-    # --- NEW: Method to start all consumers based on registered handlers ---
     def start_all_consumers(self):
-        """
-        Creates and starts consumer workers for all handlers registered via the decorator.
-
-        Iterates through the registered handlers, creates a worker for each,
-        starts it, and keeps track of it internally.
-        Handles potential errors during worker creation gracefully.
-        """
+        """Creates and starts consumer workers for all registered handlers."""
         if self._consumers_started:
-            logger.warning(
-                "Consumers already started. Call stop_all_consumers() first if you need to restart."
-            )
+            logger.warning("Consumers already started. Call stop_all_consumers() first if you need to restart.")
             return
-
         if not self._handler_registry:
             logger.warning("No handlers registered. Cannot start any consumers.")
             return
 
-        logger.info(
-            f"Starting consumers for {len(self._handler_registry)} registered handler(s)..."
-        )
-        self._active_workers = (
-            []
-        )  # Clear any previous workers (e.g., if stopped and restarted)
-
+        logger.info(f"Starting consumers for {len(self._handler_registry)} registered handler(s)...")
+        self._active_workers = []
         for (topic, group), handler in self._handler_registry.items():
-            logger.info(
-                f"Attempting to start consumer for topic='{topic}', group='{group}'..."
-            )
+            logger.info(f"Attempting to start consumer for topic='{topic}', group='{group}'...")
             try:
                 worker = self.create_consumer(topic=topic, group=group)
                 if worker:
-                    worker.start()  # Start the worker!
+                    worker.start()
                     self._active_workers.append(worker)
-                    logger.info(
-                        f"Successfully started consumer {worker.consumer_id} for topic='{topic}', group='{group}'."
-                    )
+                    logger.info(f"Successfully started consumer {worker.consumer_id} for topic='{topic}', group='{group}'.")
                 else:
-                    # create_consumer returned None (e.g., no partitions available)
-                    logger.warning(
-                        f"Consumer for topic='{topic}', group='{group}' not started (likely no partitions available currently)."
-                    )
-
+                    logger.warning(f"Consumer for topic='{topic}', group='{group}' not started (likely no partitions available currently).")
             except (ValueError, BrokerApiException, RuntimeError) as e:
-                # Log errors during creation/start but continue trying to start others
-                logger.error(
-                    f"Failed to create/start consumer for topic='{topic}', group='{group}': {e}",
-                    exc_info=True,
-                )
+                logger.error(f"Failed to create/start consumer for topic='{topic}', group='{group}': {e}", exc_info=True)
             except Exception as e:
-                logger.error(
-                    f"Unexpected error starting consumer for topic='{topic}', group='{group}': {e}",
-                    exc_info=True,
-                )
+                logger.error(f"Unexpected error starting consumer for topic='{topic}', group='{group}': {e}", exc_info=True)
 
         self._consumers_started = True
-        logger.info(
-            f"Finished starting consumers. {len(self._active_workers)} worker(s) are active."
-        )
+        logger.info(f"Finished starting consumers. {len(self._active_workers)} worker(s) are active.")
 
-    # --- NEW: Method to stop all managed consumers ---
     def stop_all_consumers(self):
-        """Stops all consumer workers that were started by this client instance."""
+        """Stops all consumer workers managed by this client."""
         if not self._consumers_started:
             logger.info("No consumers were started by this client instance.")
             return
@@ -291,26 +256,14 @@ class QTaskClient:
                 stopped_count += 1
                 logger.info(f"Worker {worker.consumer_id} stopped.")
             except Exception as e:
-                logger.error(
-                    f"Error stopping worker {worker.consumer_id}: {e}", exc_info=True
-                )
+                logger.error(f"Error stopping worker {worker.consumer_id}: {e}", exc_info=True)
 
-        logger.info(
-            f"Finished stopping consumers. {stopped_count}/{len(self._active_workers)} stopped successfully."
-        )
-        self._active_workers = []  # Clear the list after stopping
+        logger.info(f"Finished stopping consumers. {stopped_count}/{len(self._active_workers)} stopped successfully.")
+        self._active_workers = []
         self._consumers_started = False
 
     def list_topics(self) -> List[str]:
-        """
-        Gets the list of managed base topics from the Broker.
-
-        Returns:
-            List of topic names.
-
-        Raises:
-            BrokerApiException: If errors occur contacting the Broker API.
-        """
+        """Gets the list of managed base topics from the Broker."""
         logger.debug("Requesting list of topics from API...")
         try:
             return self.api_client.get_topics()
@@ -319,59 +272,46 @@ class QTaskClient:
             raise
 
     def close(self):
-        """
-        Stops all managed consumers and closes underlying connections.
-        It's recommended to call this during application shutdown.
-        """
+        """Stops consumers and closes connections."""
         logger.info("Closing QTaskClient...")
-        # --- NEW: Ensure consumers are stopped before closing API client ---
         self.stop_all_consumers()
         self.api_client.close()
         logger.info("QTaskClient closed.")
 
 
-# --- Example Usage (Updated) ---
+# --- Example Usage (Demonstrating Env Var Configuration) ---
 if __name__ == "__main__":
-    # --- Basic Logging Setup ---
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s %(name)s - %(message)s"
     )
 
-    # --- Configuration ---
-    BROKER_URL = "http://localhost:3000"  # URL of your Broker API
-    REDIS_CONN_URL = "redis://localhost:6379"  # URL of your Redis
+    # --- Configuration (Now relying on Env Vars or Defaults) ---
+    # Set environment variables before running this script, e.g.:
+    # export QTASK_BROKER_URL="http://127.0.0.1:3000"
+    # export REDIS_HOST="127.0.0.1"
+    # export REDIS_PORT="6379"
+    # export REDIS_USERNAME="myuser" # Optional
+    # export REDIS_PASSWORD="mypassword" # Optional
 
-    # --- Create client instance ---
-    qtask_client = QTaskClient(broker_api_url=BROKER_URL, redis_url=REDIS_CONN_URL)
+    print("\n--- Creating Client Instance (using Env Vars/Defaults) ---")
+    try:
+        # Instantiate WITHOUT passing URLs explicitly
+        qtask_client = QTaskClient()
+        print(f"Client created. Broker: {qtask_client.broker_api_url}, Redis: {qtask_client.redis_url}")
+    except ValueError as e:
+        print(f"Error creating client: {e}")
+        exit(1)
 
     # --- Register Handlers (Same as before) ---
-    @qtask_client.handler(topic="orders", group="processors")
-    def handle_order(data: Dict, message_id: str, partition_index: int):
+    @qtask_client.handler(topic="config_test", group="testers")
+    def handle_config_test(data: Dict, message_id: str, partition_index: int):
         logger.info(
-            f"[ORDER HANDLER][P{partition_index}] Processing order {message_id}: {data.get('order_id')}"
+            f"[CONFIG_TEST HANDLER][P{partition_index}] Received test message {message_id}: {data}"
         )
-        # Simulate work or potential errors
-        time.sleep(random.uniform(0.1, 0.3))
-        if random.random() < 0.05:  # Simulate occasional error
-            logger.error(
-                f"[ORDER HANDLER][P{partition_index}] Simulated error processing order {message_id}"
-            )
-            raise ValueError("Simulated processing error")
-        logger.info(f"[ORDER HANDLER][P{partition_index}] Finished order {message_id}")
-
-    @qtask_client.handler(topic="notifications", group="senders")
-    def handle_notification(data: Dict, message_id: str, partition_index: int):
-        logger.info(
-            f"[NOTIF HANDLER][P{partition_index}] Sending notification {message_id}: for {data.get('user')}"
-        )
-        time.sleep(random.uniform(0.05, 0.15))
-        logger.info(
-            f"[NOTIF HANDLER][P{partition_index}] Sent notification {message_id}"
-        )
+        time.sleep(0.1)
 
     # --- Main Application Logic ---
     try:
-        # List initial topics
         print("\n--- Listing Topics ---")
         try:
             topics = qtask_client.list_topics()
@@ -379,41 +319,27 @@ if __name__ == "__main__":
         except BrokerApiException as e:
             print(f"Error listing topics: {e}")
 
-        # Publish some messages (optional)
-        print("\n--- Publishing Test Messages ---")
+        print("\n--- Publishing Test Message ---")
         try:
-            qtask_client.publish("orders", "cust1", {"order_id": "ord_A", "value": 10})
-            qtask_client.publish("orders", "cust2", {"order_id": "ord_B", "value": 25})
-            qtask_client.publish(
-                "notifications", "userX", {"user": "userX", "alert": "System update"}
-            )
-            qtask_client.publish("orders", "cust1", {"order_id": "ord_C", "value": 5})
-            print("Published test messages.")
+            qtask_client.publish("config_test", "test_key", {"status": "ok"})
+            print("Published test message.")
         except BrokerApiException as e:
-            print(f"Error publishing test messages: {e}")
+            print(f"Error publishing test message: {e}")
 
-        # --- Start Consumers (Simplified) ---
         print("\n--- Starting All Consumers ---")
-        # This single call now handles creating and starting workers for all registered handlers
         qtask_client.start_all_consumers()
 
-        # --- Keep the application running ---
         print("\n--- Application Running (Press Ctrl+C to stop) ---")
-        # Your main application logic would go here (e.g., web server, background task)
-        # For this example, we just sleep.
         while True:
-            # You could add health checks for workers if needed,
-            # although the workers themselves handle reconnections.
-            time.sleep(30)  # Keep main thread alive
+            time.sleep(30)
 
     except KeyboardInterrupt:
-        print("\nShutdown signal received (KeyboardInterrupt).")
+        print("\nShutdown signal received.")
     except Exception as e:
-        print(f"\nAn unexpected error occurred in the main loop: {e}")
+        print(f"\nAn unexpected error occurred: {e}")
         logger.error("Unexpected main loop error", exc_info=True)
     finally:
-        # --- Ensure clean shutdown ---
         print("\n--- Shutting Down ---")
-        # This single call now handles stopping all managed workers and closing connections
         qtask_client.close()
         print("Application finished.")
+
