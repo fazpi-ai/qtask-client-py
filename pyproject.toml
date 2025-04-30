@@ -1,11 +1,33 @@
 [project]
 name = "qtask-client-py"
-version = "0.1.0"
+version = "0.2.0" # Consider incrementing version after major refactor
 dependencies = [
-    "requests",
-    "redis"
+    "httpx",                     # Replaced requests with httpx for async HTTP
+    "redis>=4.2",                # Ensure redis version supports asyncio
+    # Add other dependencies your library might have below
+    # e.g., "pydantic" if used for models, etc.
 ]
+# Optional: Specify Python version
+# python = ">=3.8"
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+# Optional: Add project metadata (URLs, author, etc.)
+# [project.urls]
+# Homepage = "https://github.com/yourusername/qtask-client-py"
+# Bug-Tracker = "https://github.com/yourusername/qtask-client-py/issues"
+
+# [project.optional-dependencies]
+# hiredis = ["redis[hiredis]>=4.2"] # Example: Optional faster parser
+```
+
+**Key Changes:**
+
+1.  **`dependencies`**:
+    * `requests` has been replaced with `httpx`.
+    * `redis` is kept, but specified as `redis>=4.2` to ensure compatibility with `asyncio`. You might consider `redis[hiredis]>=4.2` for potentially better performance, possibly as an optional dependency.
+2.  **`version`**: I've incremented the version to `0.2.0` as changing the core I/O model is a significant update. Adjust as needed based on your versioning scheme.
+
+You can replace the contents of your `pyproject.toml` with this updated version. Remember to reinstall the dependencies in your virtual environment after updating the file (e.g., `pip install -e .` if you're installing in editable mode, or `pip install .

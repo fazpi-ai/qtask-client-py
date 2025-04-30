@@ -1,2 +1,5 @@
 requests
 redis
+asyncio
+httpx
+redis[hiredis]
