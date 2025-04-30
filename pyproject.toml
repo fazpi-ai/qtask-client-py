@@ -21,13 +21,3 @@ build-backend = "setuptools.build_meta"
 
 # [project.optional-dependencies]
 # hiredis = ["redis[hiredis]>=4.2"] # Example: Optional faster parser
-```
-
-**Key Changes:**
-
-1.  **`dependencies`**:
-    * `requests` has been replaced with `httpx`.
-    * `redis` is kept, but specified as `redis>=4.2` to ensure compatibility with `asyncio`. You might consider `redis[hiredis]>=4.2` for potentially better performance, possibly as an optional dependency.
-2.  **`version`**: I've incremented the version to `0.2.0` as changing the core I/O model is a significant update. Adjust as needed based on your versioning scheme.
-
-You can replace the contents of your `pyproject.toml` with this updated version. Remember to reinstall the dependencies in your virtual environment after updating the file (e.g., `pip install -e .` if you're installing in editable mode, or `pip install .
