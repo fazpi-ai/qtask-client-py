@@ -446,6 +446,9 @@ class QTaskConsumerWorker:
                  await asyncio.sleep(0.1)
                  continue
 
+            # *** AÑADIR LOGGING AQUÍ ***
+            logger.debug(f"[{self.consumer_id}] ===> Attempting XREADGROUP on {self.stream_key} with ID '>' (BLOCK={self.READ_BLOCK_MILLISECONDS}ms)")
+
             try:
                 logger.debug(f"[{self.consumer_id}] Waiting for new messages (BLOCK={self.READ_BLOCK_MILLISECONDS}ms)...")
                 # Usar await para xreadgroup
@@ -457,9 +460,16 @@ class QTaskConsumerWorker:
                     block=self.READ_BLOCK_MILLISECONDS # Timeout para esperar mensajes
                 )
 
+                if response:
+                    logger.info(f"[{self.consumer_id}] ===> XREADGROUP SUCCESS! Received raw response: {response}")
+                else:
+                    # Loguear cuando no recibe nada después de esperar
+                    logger.debug(f"[{self.consumer_id}] ===> XREADGROUP returned empty response (timeout or no new messages).")
+    
                 if self._stop_event.is_set(): break
 
                 if response:
+                    logger.debug(f"[{self.consumer_id}] Entering message processing for {len(response[0][1])} message(s)...")
                     for stream, messages in response:
                         logger.info(f"[{self.consumer_id}][New] Received {len(messages)} new messages from {stream}.")
                         # Procesar concurrentemente? O secuencial? Por ahora secuencial.
@@ -473,6 +483,7 @@ class QTaskConsumerWorker:
                 last_error_time = 0 # Resetear timestamp de error
 
             except (RedisConnectionError, RedisTimeoutError, asyncio.TimeoutError) as e:
+                logger.warning(f"[{self.consumer_id}] ===> XREADGROUP communication error: {type(e).__name__} - {e}")
                 logger.warning(f"[{self.consumer_id}] Connection/Timeout error in read loop (XREADGROUP async): {e}. Will attempt reconnect on next iteration.")
                 async with self._redis_lock: # Adquirir lock para modificar cliente
                     try:
@@ -482,6 +493,7 @@ class QTaskConsumerWorker:
                     except Exception: pass
                 # No dormir aquí, el chequeo al inicio del bucle lo hará
             except Exception as e:
+                logger.error(f"[{self.consumer_id}] ===> Unexpected XREADGROUP error: {type(e).__name__} - {e}", exc_info=True)
                 current_time = time.time()
                 # Loguear error solo si ha pasado un tiempo para evitar spam
                 if current_time - last_error_time > self.READ_LOOP_ERROR_DELAY_SECONDS:

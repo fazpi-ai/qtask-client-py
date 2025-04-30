@@ -46,9 +46,8 @@ async def handle_whatsapp_message(data: dict, message_id: str, partition_index: 
     to = data.get("to")
     content = data.get("content")
     logging.info(
-        f"[HANDLER whatsapp_messages P{partition_index}] Received message for user {to} ({content}). ID: {message_id}"
+        f"[🛑 HANDLER whatsapp_messages P{partition_index}] Received message for user {to} ({content}). ID: {message_id}"
     )
-
 
 # --- Main Async Function ---
 async def main():
@@ -59,30 +58,6 @@ async def main():
     logging.info("Starting all registered consumers...")
     await qtask_client.start_all_consumers()
     logging.info("Consumers startup process initiated.")
-
-    # --- Optional: Publish some test messages ---
-    try:
-        logging.info("Publishing a test message to user_signups...")
-        await qtask_client.publish(
-            topic="user_signups",
-            partition_key="user123@example.com",
-            data={
-                "userId": "user123",
-                "email": "user123@example.com",
-                "timestamp": time.time(),
-            },
-        )
-        logging.info("Publishing a test message to image_uploads...")
-        await qtask_client.publish(
-            topic="image_uploads",
-            partition_key="img_abc.jpg",
-            data={"imageId": "img_abc", "path": "/uploads/img_abc.jpg", "size": 1024},
-        )
-        logging.info("Test messages published.")
-    except BrokerApiException as e:
-        logging.error(f"Failed to publish test messages: {e}")
-    except Exception as e:
-        logging.error(f"Unexpected error publishing test messages: {e}", exc_info=True)
 
     # --- Keep Application Running ---
     logging.info("Application running. Press Ctrl+C to stop.")
