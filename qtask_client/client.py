@@ -169,7 +169,7 @@ class QTaskClient:
             logger.info(f"Requesting partition assignment from API for {consumer_id} (async)...")
             # --- Usar await ---
             partition_index = await self.api_client.assign_partition(topic, group, consumer_id)
-            logger.info(f"Partition {partition_index} assigned to {consumer_id} (async).")
+            logger.info(f"✅ Partition {partition_index} assigned to {consumer_id} (async).")
         except NoPartitionsAvailableError:
             logger.warning(f"No partitions currently available for topic '{topic}', group '{group}'. Consumer not created.")
             return None
