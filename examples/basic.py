@@ -11,7 +11,7 @@ import config
 
 # Configure logging for your application (do this once)
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s %(name)s - %(message)s"
+    level=logging.DEBUG, format="%(asctime)s - %(levelname)s %(name)s - %(message)s"
 )
 
 # --- Instantiate the Client Globally (Needed for Decorators) ---

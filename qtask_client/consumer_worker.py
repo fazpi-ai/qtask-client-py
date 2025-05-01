@@ -394,8 +394,35 @@ class QTaskConsumerWorker:
         last_error_time = 0
         await asyncio.sleep(self.TASK_INITIAL_DELAY_SECONDS)
 
+        loop_iteration_count = 0
+
+        logger.debug(f"[{self.consumer_id}] Read loop: Checking while condition...")
+
         while not self._stop_event.is_set():
+            loop_iteration_count += 1
+            # **** Log 1 (Visto) ****
+            logger.debug(f"[{self.consumer_id}] -------> Entrando en iteración {loop_iteration_count} del read_loop.")
+            
+
+            # **** Intenta añadir un pequeño await aquí ****
+            try:
+                logger.debug(f"[{self.consumer_id}] Read loop: Antes del mini await...")
+                await asyncio.sleep(0.001) # Pequeñísimo sleep para ceder control
+                logger.debug(f"[{self.consumer_id}] Read loop: Después del mini await...")
+            except asyncio.CancelledError:
+                logger.warning(f"[{self.consumer_id}] Read loop: ¡Tarea cancelada justo al inicio de la iteración!")
+                raise # Re-lanzar para que se maneje la cancelación
+            except Exception as e_sleep:
+                logger.error(f"[{self.consumer_id}] Read loop: ¡Error inesperado en el mini await! {e_sleep}", exc_info=True)
+                # Considera salir o manejar el error
+                break
+
+
+            # **** Log 1a (No visto antes) ****
+            logger.debug(f"[{self.consumer_id}] Read loop: Initializing loop variables...")
             reconnect_attempted = False
+            needs_sleep = False
+            logger.debug(f"[{self.consumer_id}] Read loop: Loop variables initialized.")
             # --- Chequeo de conexión y reconexión ---
             async with self._redis_lock:
                 if not self.redis_client:
@@ -502,7 +529,7 @@ class QTaskConsumerWorker:
                 # Esperar antes de continuar
                 await asyncio.sleep(self.READ_LOOP_ERROR_DELAY_SECONDS)
 
-        logger.info(f"[{self.consumer_id}] Read loop task stopped.")
+        logger.info(f"[{self.consumer_id}] Read loop task exited WHILE loop. Stop event set: {self._stop_event.is_set()}")
 
     # --- Convertido a async def ---
     async def start(self):
